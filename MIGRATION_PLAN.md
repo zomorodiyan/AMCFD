@@ -5,7 +5,28 @@
 **Physics:** Heat transfer + Navier-Stokes (enthalpy, velocity, pressure)  
 **Solver:** Line-by-line TDMA with OpenMP | **Grid:** Non-uniform staggered (max 1200×1200×180)
 
-**Modules:** `constant`, `parameters`, `geometry`, `initialization`, `property`, `entotemp`, `laserinput`, `toolpath`, `boundary`, `discretization`, `source`, `solver`, `dimensions`, `convergence`, `residue`, `revision`, `fluxes`, `printing`, `main`
+**Fortran Source Files:**
+| File | Purpose |
+|------|----------|
+| `mod_const.f90` | Physical constants |
+| `mod_param.f90` | Input parameters, namelist parsing |
+| `mod_geom.f90` | Grid generation, geometry |
+| `mod_init.f90` | State initialization |
+| `mod_prop.f90` | Material properties |
+| `mod_entot.f90` | Enthalpy↔Temperature conversion |
+| `mod_laser.f90` | Laser heat source |
+| `mod_toolpath.f90` | Toolpath loading (.crs files) |
+| `mod_bound.f90` | Boundary conditions |
+| `mod_discret.f90` | FVM discretization |
+| `mod_sour.f90` | Source terms |
+| `mod_solve.f90` | TDMA solver |
+| `mod_dimen.f90` | Melt pool dimensions |
+| `mod_converge.f90` | Convergence checks |
+| `mod_resid.f90` | Residual calculation |
+| `mod_revise.f90` | Pressure/velocity correction |
+| `mod_flux.f90` | Heat flux balance |
+| `mod_print.f90` | Output routines |
+| `main.f90` | Main program, time loop |
 
 **Input:** `inputfile/input_param.txt` (geometry, material, numerics, BCs) | `ToolFiles/*.crs` (toolpath)
 
@@ -43,76 +64,111 @@ These files contain:
 | **Previous timestep** | `unot, hnot` | Saved at start of timestep |
 | **Derived on-demand** | `fracl, vis` | Computed as needed |
 
-### Fortran Pattern Mapping
-
-| Fortran Pattern | Target Equivalent |
-|-----------------|-------------------|
-| `common /block/ u,v,w` | State container/struct |
-| `u(i,j,k) = ...` (in-place) | Return new array |
-| Subroutine with `intent(inout)` | Pure function returning new state |
-| `EQUIVALENCE(phi, uVel)` | Explicit field access |
-| `allocate(u(ni,nj,nk))` | Array initialization in container |
-
 ---
 
 ## Migration Steps
 
+> See [`STRUCTURE_PLAN.md`](./STRUCTURE_PLAN.md) for target module organization and data flow.
+>
+> **Dependencies:** Steps 1-2 must complete first. Steps 3-5 can run in parallel. Steps 6-8 depend on 3-5. Steps 9-10 depend on all previous.
+
 ---
 
-### Step 1: Config & Grid
+### Step 1: Types & Config
 
-**Convert:** `mod_const.f90`, `mod_param.f90`, `mod_geom.f90`
+**Create:** `types.py`, `io.py`  
+**Convert:** `mod_const.f90`, `mod_param.f90`
 
 **Prompt:**
 ```
-Convert constants, parameters, and grid generation.
-- Parse input_param.txt (namelist format) into config object
-- Generate non-uniform staggered grid with power-law stretching
-- Arrays: x, y, z, xu, yv, zw, dxpwinv, dxpeinv, dypsinv, dypninv, dzpbinv, dzptinv
-- Cell volumes: vol(ni,nj,nk), face areas: areaij, areaik, areajk
+Create state containers and parse input configuration.
+- Define NamedTuples: FluidState, FluidStatePrev, GridParams, MaterialProps, 
+  DiscretCoeffs, LaserState, PhysicsParams, SimulationParams, TimeState
+- Parse input_param.txt (namelist format) into PhysicsParams + SimulationParams
+- Physical constants: acpa, acpb, acpl, tsolid, tliquid, dgdt, emiss, sigma, hconv
+- Numerical params: delt, timax, urf_vel, urf_p, urf_h
+```
+**Test:** Verify all parameters parsed correctly.
+
+---
+
+### Step 2: Grid Generation
+
+**Create:** `grid.py`  
+**Convert:** `mod_geom.f90`
+
+**Prompt:**
+```
+Generate non-uniform staggered grid with power-law stretching.
+- Arrays: x, y, z (cell centers), xu, yv, zw (velocity faces)
+- Inverse distances: dxpwinv, dxpeinv, dypsinv, dypninv, dzpbinv, dzptinv
+- Cell volumes: vol[ni,nj,nk], face areas: areaij, areaik, areajk
 - Use runtime allocation instead of hardcoded nx=1200, ny=1200, nz=180
+- Return GridParams NamedTuple
 ```
 **Test:** Compare grid arrays. Exact match expected.
 
 ---
 
-### Step 2: State & Properties
+### Step 3: State Initialization
 
-**Convert:** `mod_init.f90`, `mod_prop.f90`, `mod_entot.f90`
+**Create:** `initial.py`  
+**Convert:** `mod_init.f90`
 
 **Prompt:**
 ```
-Convert state initialization and material properties.
-- Fields: uVel, vVel, wVel, pressure, pp, enthalpy, temp + previous timestep (unot, vnot, etc.)
-- Properties: vis, diff, den | Coefficients: ap, an, as, ae, aw, at, ab | Source: su, sp
-- Initialize to preheat temperature/enthalpy
-- Enthalpy↔Temperature (3 regions):
-  - Solid: T = (sqrt(acpb² + 2*acpa*H) - acpb) / acpa
-  - Mushy: fracl = (H-hsmelt)/(hlcal-hsmelt), T = deltemp*fracl + tsolid
-  - Liquid: T = (H - hlcal)/acpl + tliquid
+Initialize flow field to preheat conditions.
+- Fields: uVel, vVel, wVel (zeros), pressure, pp (zeros)
+- enthalpy: computed from preheat temperature
+- temp: preheat temperature
+- fracl: 0 (solid)
+- Return FluidState NamedTuple
 ```
 **Test:** Compare initial state. Tolerance ~1e-10.
 
 ---
 
-### Step 3: Laser & Toolpath
+### Step 4: Properties & H↔T Conversion
 
+**Create:** `properties.py`  
+**Convert:** `mod_prop.f90`, `mod_entot.f90`
+
+**Prompt:**
+```
+Convert material properties and enthalpy↔temperature relations.
+- Properties: vis(T), diff(T), den (constant or T-dependent)
+- Enthalpy→Temperature (3 regions):
+  - Solid (H < hsmelt): T = (sqrt(acpb² + 2*acpa*H) - acpb) / acpa
+  - Mushy (hsmelt ≤ H ≤ hlcal): fracl = (H-hsmelt)/(hlcal-hsmelt), T = deltemp*fracl + tsolid
+  - Liquid (H > hlcal): T = (H - hlcal)/acpl + tliquid
+- Temperature→Enthalpy (inverse)
+- Use jnp.where for JIT-compatible branching
+```
+**Test:** Compare T↔H round-trip. Tolerance ~1e-10.
+
+---
+
+### Step 5: Laser & Toolpath
+
+**Create:** `laser.py`  
 **Convert:** `mod_laser.f90`, `mod_toolpath.f90`
 
 **Prompt:**
 ```
-Convert laser heat source and toolpath.
+Convert laser heat source and toolpath loading.
 - Load .crs file: 5 columns (time, x, y, z, laser_on)
-- Track beam_pos, beam_posy; calculate scanvelx, scanvely
-- Gaussian heat: heatin(i,j) = peakhin * exp(-alasfact * dist² / rb²)
+- Track beam_pos, beam_posy; calculate scanvelx, scanvely from toolpath
+- Gaussian heat: heatin[i,j] = peakhin * exp(-alasfact * dist² / rb²)
 - Total input: heatinLaser = sum(areaij * heatin)
+- Return LaserState NamedTuple
 ```
 **Test:** Compare heatin array for first timesteps. Tolerance ~1e-8.
 
 ---
 
-### Step 4: Boundary Conditions
+### Step 6: Boundary Conditions
 
+**Create:** `boundary.py`  
 **Convert:** `mod_bound.f90`
 
 **Prompt:**
@@ -121,70 +177,80 @@ Convert boundary conditions (selected by ivar=1,2,3,4,5).
 - Velocity (ivar=1,2,3): Marangoni at top: uVel(i,j,nk) = uVel(i,j,nkm1) + fracl*dgdt*dT/dx/(vis*dz)
 - Pressure (ivar=4): Zero gradient
 - Enthalpy (ivar=5): Top=laser+radiation+convection; sides/bottom=convection; j=1 symmetry
+- Return updated su, sp arrays
 ```
 **Test:** Compare su, sp arrays. Tolerance ~1e-8.
 
 ---
 
-### Step 5: Discretization & Source
+### Step 7: Discretization & Source
 
+**Create:** `discretization.py`, `source.py`  
 **Convert:** `mod_discret.f90`, `mod_sour.f90`
 
 **Prompt:**
 ```
 Convert FVM discretization (performance critical).
 - Power-law scheme for convection/diffusion
-- 7-point stencil: ap, ae, aw, an, as, at, ab (staggered grid)
-- Source: mushy zone Darcy damping, buoyancy, latent heat
+- 7-point stencil coefficients: ap, ae, aw, an, as_, at, ab (staggered grid)
+- Source terms: mushy zone Darcy damping, buoyancy, latent heat
 - Under-relaxation: ap = ap/urf, su += (1-urf)*ap*phi
-- Vectorize for GPU
+- Vectorize for GPU (no explicit loops)
+- Return DiscretCoeffs NamedTuple
 ```
 **Test:** Compare coefficient arrays. Tolerance ~1e-8.
 
 ---
 
-### Step 6: Solver
+### Step 8: TDMA Solver
 
+**Create:** `solver.py`  
 **Convert:** `mod_solve.f90`
 
 **Prompt:**
 ```
 Convert TDMA solver.
-- Line-by-line Thomas algorithm: solution_enthalpy, solution_uvw
-- OpenMP parallel over j-lines → batch for GPU
+- Line-by-line Thomas algorithm: solve_enthalpy, solve_uvw
+- OpenMP parallel over j-lines → batch/vectorize for GPU
+- Consider batched TDMA or iterative solver for better GPU utilization
+- Return new field array (do not modify in place)
 ```
 **Test:** Compare solved fields. Tolerance ~1e-6.
 
 ---
 
-### Step 7: Supporting Modules
+### Step 9: Convergence & Pool Size
 
-**Convert:** `mod_dimen.f90`, `mod_converge.f90`, `mod_resid.f90`, `mod_revise.f90`
+**Create:** `convergence.py`, `pool.py`  
+**Convert:** `mod_converge.f90`, `mod_resid.f90`, `mod_dimen.f90`, `mod_flux.f90`
 
 **Prompt:**
 ```
-Convert supporting calculations.
-- pool_size: melt pool length/depth/width by interpolating solidus isotherm
-- residual: sum|ap*phi - sum(anb*phi_nb) - su|
-- revision_p: velocity correction u += du*(p_west - p_east), pressure update
+Convert convergence checks and melt pool calculations.
+- Residual: sum|ap*phi - sum(anb*phi_nb) - su|
+- Heat balance ratio: (hin + heatvol) / (hout + accumulation)
+- Convergence: amaxres < 5e-4 and 0.99 < ratio < 1.01 (heating); resorh < 5e-7 (cooling)
+- Pool dimensions: length/depth/width by interpolating solidus isotherm
 ```
 **Test:** Compare pool dimensions and residuals. Tolerance ~1e-6.
 
 ---
 
-### Step 8: Main Loop & Output
+### Step 10: Main Loop & Output
 
-**Convert:** `main.f90`, `mod_flux.f90`, `mod_print.f90`
+**Create:** `main.py`  
+**Convert:** `main.f90`, `mod_revise.f90`, `mod_print.f90`
 
 **Prompt:**
 ```
 Convert main time loop and output.
-- Outer: timet += delt until timax; update laser position
-- Inner: iterate until convergence (solve energy → H↔T → pool_size → momentum if melted)
-- Convergence: amaxres < 5e-4 and 0.99 < ratio < 1.01 (heating); resorh < 5e-7 (cooling)
-- Heat balance: ratio = (hin + heatvol) / (hout + accumulation)
-- Output: time, iterations, residuals, pool dimensions, heat balance
-- Replace GOTO 10/30/41/50 with proper loops
+- Outer loop: timet += delt until timax; update laser position each step
+- Inner loop: iterate until convergence (solve energy → H↔T → pool_size → momentum if melted)
+- Pressure correction: revision_p → velocity correction u += du*(p_west - p_east), pressure update
+- Replace GOTO 10/30/41/50 with proper while loops and conditionals
+- Output: time, iterations, residuals, pool dimensions, heat balance to output.txt
+- Tecplot output: tecmov*.tec
+- Use jax.lax.while_loop for outer time loop, lax.scan for inner iteration
 ```
 **Test:** Compare output.txt. Tolerance ~1e-4.
 
@@ -208,8 +274,58 @@ Convert main time loop and output.
 
 ## Technical Notes
 
-- **OpenMP → GPU:** Parallel j-loops → vectorized ops
-- **TDMA:** Serial per line; consider batched TDMA or iterative for GPU
-- **GOTO → loops:** main.f90 uses GOTO 10/30/41/50
-- **EQUIVALENCE:** `phi` aliases u,v,w,p → make explicit
-- **Phase change:** Solid/mushy/liquid with different H↔T relations
+### Fortran → JAX/Taichi Patterns
+
+| Fortran Pattern | JAX Solution | Taichi Solution |
+|-----------------|--------------|------------------|
+| OpenMP parallel j-loops | `jax.vmap` over j | `ti.kernel` with parallel for |
+| In-place array update | Return new array with `_replace()` | Use `ti.field` with explicit copy |
+| GOTO statements | `jax.lax.while_loop` / `cond` | Python while/if |
+| EQUIVALENCE aliases | Explicit field access | Explicit field access |
+| Allocatable arrays | Dynamic shapes via params | Static shapes with `ti.field` |
+
+### TDMA Solver Strategy
+
+- **Fortran:** Line-by-line serial TDMA, OpenMP parallel over j-lines
+- **JAX Option 1:** Batched TDMA using `jax.lax.scan` over lines
+- **JAX Option 2:** Iterative solver (Jacobi/Gauss-Seidel) for better GPU parallelism
+- **Taichi:** Parallel TDMA with `ti.kernel`, or use sparse solver
+
+### Control Flow Conversion
+
+```fortran
+! Fortran GOTO pattern (main.f90)
+10 CONTINUE
+   ... compute ...
+   IF (condition) GOTO 30
+   GOTO 10
+30 CONTINUE
+```
+
+```python
+# JAX equivalent
+def iteration_loop(carry):
+    state, converged = carry
+    new_state = compute_step(state)
+    return (new_state, check_convergence(new_state))
+
+final_state, _ = jax.lax.while_loop(
+    lambda carry: ~carry[1],  # continue while not converged
+    iteration_loop,
+    (initial_state, False)
+)
+```
+
+### Phase Change Handling
+
+- **Solid:** H < hsmelt → T from quadratic Cp relation
+- **Mushy:** hsmelt ≤ H ≤ hlcal → Linear interpolation, fracl ∈ [0,1]
+- **Liquid:** H > hlcal → T from constant Cp
+- Use `jnp.where` (JAX) or `ti.select` (Taichi) for branchless computation
+
+### Performance Considerations
+
+1. **Memory:** 3D fields at 1200×1200×180 = ~260M cells × 8 bytes × ~20 fields ≈ 40 GB
+2. **Batch size:** May need to tile domain for GPU memory limits
+3. **JIT compilation:** First call slow, subsequent calls fast
+4. **Precision:** Use float64 for accuracy matching Fortran
