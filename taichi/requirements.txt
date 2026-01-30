@@ -1,0 +1,10 @@
+# Requirements for AM-CFD Taichi Implementation
+# Install with: pip install -r requirements.txt
+
+# Core dependencies
+taichi>=1.7.0          # GPU-accelerated computing
+numpy>=1.24.0          # Numerical arrays
+
+# Optional: for visualization
+# matplotlib>=3.7.0    # Plotting
+# pyvista>=0.40.0      # 3D visualization
