@@ -4,24 +4,41 @@
 
 This step implements the foundational data structures and input/output handling for the AM-CFD Taichi implementation. The design leverages Taichi's `ti.field()` for GPU-compatible arrays while using Python dataclasses for parameter containers.
 
-## Key Differences from JAX Version
+## Input File Format
 
-### Data Structures
+The Taichi implementation uses **YAML format** for input files, providing a clean and readable configuration:
 
-| JAX | Taichi | Reason |
-|-----|--------|--------|
-| `NamedTuple` | `@dataclass` | Mutable fields for Taichi compatibility |
-| `jnp.Array` | `ti.field()` | GPU memory management |
-| Immutable state | `@ti.data_oriented` classes | Taichi's kernel access pattern |
+```yaml
+# Geometry
+geometry:
+  x:
+    zones: 1
+    zone_length_m: 4.0e-3
+    cv_per_zone: 200
+    cv_boundary_exponent: 1
+  y:
+    zones: 1
+    zone_length_m: 4.0e-3
+    cv_per_zone: 200
+    cv_boundary_exponent: 1
+  z:
+    zones: 2
+    zone_length_m: [0.5e-3, 0.2e-3]
+    cv_per_zone: [10, 20]
+    cv_boundary_exponent: [-1.5, 1]
 
-### Field Types
+# Material properties
+material_properties:
+  dens: 8440
+  tsolid: 1563
+  tliquid: 1623
+  # ... more properties
 
-```python
-# JAX uses JAX numpy arrays
-uVel: Array  # shape (ni, nj, nk)
-
-# Taichi uses ti.field()
-self.uVel = ti.field(dtype=ti.f64, shape=(ni, nj, nk))
+# Numerical relaxation
+numerical_relax:
+  maxit: 50
+  delt: 2e-5
+  urfu: 0.7
 ```
 
 ## Files
@@ -49,7 +66,9 @@ Contains all type definitions:
 
 Input/output handling:
 
-- `parse_input()`: Parse Fortran namelist-style input files
+- `parse_input()`: Parse YAML input files
+- `_read_yaml()`: Read and flatten YAML structure
+- `_parse_geometry_yaml()`: Parse geometry section
 - `load_toolpath()`: Load .crs toolpath files
 - `write_output_header()`: Initialize output files
 - `write_output_line()`: Append timestep data
@@ -64,8 +83,8 @@ ti.init(arch=ti.gpu)  # or ti.cpu
 from data_structures import PhysicsParams, SimulationParams, GridParams, State
 from param import parse_input
 
-# Parse input file
-physics, simulation, laser, output = parse_input("inputfile/input_param.txt")
+# Parse YAML input file
+physics, simulation, laser, output = parse_input("inputfile/input_param.yaml")
 
 # Create Taichi fields
 grid = GridParams(simulation.ni, simulation.nj, simulation.nk)
@@ -73,9 +92,9 @@ state = State(simulation.ni, simulation.nj, simulation.nk)
 
 # Access in kernels
 @ti.kernel
-def initialize_temp(state: ti.template(), physics: ti.template()):
+def initialize_temp(state: ti.template(), tpreheat: ti.f64):
     for i, j, k in state.temp:
-        state.temp[i, j, k] = physics.tpreheat
+        state.temp[i, j, k] = tpreheat
 ```
 
 ## Testing
@@ -84,8 +103,32 @@ Run tests with:
 
 ```bash
 cd taichi
+source ../taichi_env/bin/activate
 python test_step1.py
 ```
+
+## Dependencies
+
+Install with:
+
+```bash
+pip install -r requirements.txt
+```
+
+Required packages:
+- `taichi>=1.7.0` - GPU-accelerated computing
+- `numpy>=1.24.0` - Numerical arrays
+- `pyyaml>=6.0` - YAML parsing
+
+## YAML vs Fortran Namelist
+
+| Feature | YAML | Fortran Namelist |
+|---------|------|------------------|
+| Format | Hierarchical, indented | Flat with &sections |
+| Arrays | Native `[a, b, c]` | Space-separated |
+| Comments | `#` | `!` |
+| Readability | High | Medium |
+| Python parsing | `yaml.safe_load()` | Custom parser |
 
 ## Taichi-Specific Considerations
 
@@ -123,9 +166,3 @@ numpy_array = field.to_numpy()
 # CPU -> GPU
 field.from_numpy(numpy_array)
 ```
-
-## Performance Notes
-
-1. **Double precision**: Using `ti.f64` for accuracy in CFD
-2. **Field layout**: Default struct-of-arrays (SoA) for better memory coalescing
-3. **Kernel fusion**: Combine operations in single kernels where possible

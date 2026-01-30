@@ -1,8 +1,8 @@
 """
 Test Step 1: Types & Config (Taichi Implementation)
 
-Verifies that input parsing works correctly and all parameters are extracted.
-Uses the actual input_param.txt from the Fortran code.
+Verifies that YAML input parsing works correctly and all parameters are extracted.
+Uses the input_param.yaml file.
 """
 
 import sys
@@ -16,44 +16,10 @@ import taichi as ti
 ti.init(arch=ti.cpu)  # Use CPU for testing, can switch to ti.gpu for GPU
 
 from data_structures import PhysicsParams, SimulationParams, LaserParams, GridParams, State
-from param import parse_input, load_toolpath, _read_namelist, _temp_to_enthalpy_solid
+from param import parse_input, load_toolpath, _read_yaml, _temp_to_enthalpy_solid
 
-# Path to actual input file (copied from fortran/inputfile/)
-INPUT_FILE = Path(__file__).parent / "inputfile" / "input_param.txt"
-
-
-def test_parse_value():
-    """Test parsing individual values."""
-    from param import _parse_value, _parse_single_value
-    
-    # Test integers
-    assert _parse_single_value("42") == 42
-    assert _parse_single_value("  100  ") == 100
-    
-    # Test floats
-    assert abs(_parse_single_value("3.14") - 3.14) < 1e-10
-    assert abs(_parse_single_value("1.0e-6") - 1.0e-6) < 1e-16
-    
-    # Test Fortran double precision
-    assert abs(_parse_single_value("1.0d-6") - 1.0e-6) < 1e-16
-    assert abs(_parse_single_value("2.5D+3") - 2500.0) < 1e-10
-    
-    # Test booleans
-    assert _parse_value(".true.") == True
-    assert _parse_value(".false.") == False
-    assert _parse_value(".T.") == True
-    assert _parse_value(".F.") == False
-    
-    # Test strings
-    assert _parse_value("'hello'") == "hello"
-    assert _parse_value('"world"') == "world"
-    
-    # Test arrays
-    result = _parse_value("1.0, 2.0, 3.0")
-    assert len(result) == 3
-    assert abs(result[0] - 1.0) < 1e-10
-    
-    print("✓ Value parsing tests passed")
+# Path to YAML input file
+INPUT_FILE = Path(__file__).parent / "inputfile" / "input_param.yaml"
 
 
 def test_enthalpy_conversion():
@@ -84,8 +50,8 @@ def test_physics_params():
     params = {
         'tsolid': 1563.0,
         'tliquid': 1623.0,
-        'tpreheat': 300.0,
-        'rho': 7800.0,
+        'temppreheat': 300.0,
+        'dens': 7800.0,
         'hlatent': 2.7e5,
     }
     
@@ -133,9 +99,9 @@ def test_laser_params():
     import math
     
     params = {
-        'power': 200.0,
-        'rb': 50.0e-6,
-        'absorp': 0.35,
+        'alaspowvol': 200.0,
+        'sourcerad': 50.0e-6,
+        'alasetavol': 0.35,
     }
     
     from param import _create_laser_params
@@ -152,63 +118,55 @@ def test_laser_params():
     print("✓ LaserParams tests passed")
 
 
-def test_sample_input_file():
-    """Test parsing the actual input_param.txt from Fortran code."""
+def test_yaml_input_file():
+    """Test parsing the YAML input file."""
     
     # Verify input file exists
     if not INPUT_FILE.exists():
-        raise FileNotFoundError(f"Input file not found: {INPUT_FILE}\n"
-                                "Please copy from fortran/inputfile/input_param.txt")
+        raise FileNotFoundError(f"Input file not found: {INPUT_FILE}")
     
     # Parse the actual file
     physics, simulation, laser, output = parse_input(str(INPUT_FILE))
     
     # Verify grid dimensions from geometry section
-    # From input file: ncvx=[200], ncvy=[200], ncvz=[10,20] -> total 200, 200, 30
+    # From YAML: cv_per_zone: x=200, y=200, z=[10,20] -> total 200, 200, 30
     assert simulation.ni == 200, f"Expected ni=200, got {simulation.ni}"
     assert simulation.nj == 200, f"Expected nj=200, got {simulation.nj}"
     assert simulation.nk == 30, f"Expected nk=30, got {simulation.nk}"
     
     # Verify domain lengths
-    # xzone=[4.0e-3], yzone=[4.0e-3], zzone=[0.5e-3, 0.2e-3] -> 4mm, 4mm, 0.7mm
+    # zone_length_m: x=4e-3, y=4e-3, z=[0.5e-3, 0.2e-3] -> 4mm, 4mm, 0.7mm
     assert abs(simulation.xlen - 4.0e-3) < 1e-10, f"Expected xlen=4mm, got {simulation.xlen}"
     assert abs(simulation.ylen - 4.0e-3) < 1e-10, f"Expected ylen=4mm, got {simulation.ylen}"
     assert abs(simulation.zlen - 0.7e-3) < 1e-10, f"Expected zlen=0.7mm, got {simulation.zlen}"
     
-    # Verify material properties from &material_properties namelist
+    # Verify material properties
     assert physics.rho == 8440.0, f"Expected rho=8440, got {physics.rho}"
     assert physics.tsolid == 1563.0, f"Expected tsolid=1563, got {physics.tsolid}"
     assert physics.tliquid == 1623.0, f"Expected tliquid=1623, got {physics.tliquid}"
     assert physics.hsmelt == 861e3, f"Expected hsmelt=861e3, got {physics.hsmelt}"
     
-    # Verify laser parameters from &volumetric_parameters namelist
+    # Verify laser parameters
     assert laser.power == 300.0, f"Expected power=300, got {laser.power}"
     assert abs(laser.absorptivity - 0.3512) < 1e-10, f"Expected absorptivity=0.3512, got {laser.absorptivity}"
     
-    # Verify numerical parameters from &numerical_relax namelist
+    # Verify numerical parameters
     assert abs(simulation.delt - 2e-5) < 1e-10, f"Expected delt=2e-5, got {simulation.delt}"
     assert simulation.urf_vel == 0.7, f"Expected urfu=0.7, got {simulation.urf_vel}"
     assert simulation.max_iter == 50, f"Expected maxit=50, got {simulation.max_iter}"
     
-    print("✓ Actual input file (input_param.txt) parsing tests passed")
+    print("✓ YAML input file parsing tests passed")
 
 
 def test_geometry_parsing():
-    """Test parsing of geometry section (zone-based grid)."""
-    from param import _read_namelist
+    """Test parsing of geometry section from YAML."""
+    from param import _read_yaml
     
     if not INPUT_FILE.exists():
         print("⚠ Skipping geometry test - input file not found")
         return
     
-    params = _read_namelist(str(INPUT_FILE))
-    
-    # Debug: print available keys
-    geom_keys = ['nzx', 'nzy', 'nzz', 'xzone', 'yzone', 'zzone', 'ncvx', 'ncvy', 'ncvz', 'nx', 'ny', 'nz']
-    missing = [k for k in geom_keys if k not in params]
-    if missing:
-        print(f"  Available keys: {sorted(params.keys())}")
-        raise KeyError(f"Missing geometry keys: {missing}")
+    params = _read_yaml(str(INPUT_FILE))
     
     # Check zone counts
     assert params['nzx'] == 1, f"Expected nzx=1, got {params['nzx']}"
@@ -315,13 +273,12 @@ def run_all_tests():
     print("Testing Step 1: Types & Config (Taichi Implementation)")
     print("=" * 60 + "\n")
     
-    test_parse_value()
     test_enthalpy_conversion()
     test_physics_params()
     test_simulation_params()
     test_laser_params()
     test_geometry_parsing()
-    test_sample_input_file()
+    test_yaml_input_file()
     test_toolpath_loading()
     test_taichi_field_creation()
     test_taichi_field_operations()

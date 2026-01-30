@@ -1,13 +1,12 @@
 """
 AM-CFD Taichi Implementation - Input/Output
 
-Converted from Fortran modules: mod_param.f90, mod_print.f90
-Parses namelist-style input files and handles output.
+Parses YAML input files and handles output.
 """
 
-import re
+import yaml
 from pathlib import Path
-from typing import Tuple, Dict, Any, Optional
+from typing import Tuple, Dict, Any, List, Union
 import numpy as np
 
 from data_structures import (
@@ -17,15 +16,15 @@ from data_structures import (
 
 def parse_input(filepath: str) -> Tuple[PhysicsParams, SimulationParams, LaserParams, OutputConfig]:
     """
-    Parse input parameter file (Fortran namelist format).
+    Parse YAML input parameter file.
     
     Args:
-        filepath: Path to input_param.txt
+        filepath: Path to input_param.yaml
         
     Returns:
         Tuple of (PhysicsParams, SimulationParams, LaserParams, OutputConfig)
     """
-    params = _read_namelist(filepath)
+    params = _read_yaml(filepath)
     
     # Extract physics parameters
     physics = _create_physics_params(params)
@@ -42,197 +41,143 @@ def parse_input(filepath: str) -> Tuple[PhysicsParams, SimulationParams, LaserPa
     return physics, simulation, laser, output
 
 
-def _read_namelist(filepath: str) -> Dict[str, Any]:
+def _convert_value(val: Any) -> Any:
+    """Convert YAML value to proper numeric type if possible."""
+    if isinstance(val, str):
+        # Try to convert scientific notation strings to float
+        try:
+            return float(val)
+        except ValueError:
+            return val
+    elif isinstance(val, list):
+        return [_convert_value(v) for v in val]
+    elif isinstance(val, dict):
+        return {k: _convert_value(v) for k, v in val.items()}
+    return val
+
+
+def _read_yaml(filepath: str) -> Dict[str, Any]:
     """
-    Read Fortran input file (AM-CFD format).
+    Read YAML input file and flatten to parameter dictionary.
     
-    Handles the actual format from mod_param.f90:
-        - First section: Line-by-line geometry data
-        - Then namelists: &process_parameters, &material_properties, etc.
+    Args:
+        filepath: Path to YAML file
+        
+    Returns:
+        Flattened dictionary of parameters
     """
+    with open(filepath, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    # Convert any string numbers to proper numeric types
+    config = _convert_value(config)
+    
+    # Flatten nested structure for easier access
     params = {}
     
-    with open(filepath, 'r') as f:
-        lines = f.readlines()
+    # Parse geometry section
+    if 'geometry' in config:
+        geom = config['geometry']
+        params.update(_parse_geometry_yaml(geom))
     
-    # Parse geometry section (lines 1-13, before namelists)
-    # Format from mod_param.f90 read_data subroutine
-    line_idx = 0
-    geometry_lines = []
-    namelist_content = []
+    # Parse process parameters
+    if 'process_parameters' in config:
+        params.update(config['process_parameters'])
     
-    for line in lines:
-        stripped = line.strip()
-        # Check if we've reached a namelist block
-        if stripped.startswith('&'):
-            namelist_content.append(line)
-        elif namelist_content:
-            namelist_content.append(line)
-        else:
-            geometry_lines.append(stripped)
+    # Parse volumetric parameters
+    if 'volumetric_parameters' in config:
+        params.update(config['volumetric_parameters'])
     
-    # Parse geometry data (line-by-line format)
-    try:
-        params.update(_parse_geometry_section(geometry_lines))
-    except Exception as e:
-        print(f"Warning: Could not parse geometry section: {e}")
+    # Parse material properties
+    if 'material_properties' in config:
+        params.update(config['material_properties'])
     
-    # Parse namelist blocks
-    content = ''.join(namelist_content)
+    # Parse powder properties
+    if 'powder_properties' in config:
+        params.update(config['powder_properties'])
     
-    # Remove inline comments
-    content_lines = []
-    for line in content.split('\n'):
-        if '!' in line:
-            line = line[:line.index('!')]
-        content_lines.append(line)
-    content = '\n'.join(content_lines)
+    # Parse numerical relaxation
+    if 'numerical_relax' in config:
+        params.update(config['numerical_relax'])
     
-    # Parse variable assignments from namelists
-    # Fortran namelist format: &name var1=val1, var2=val2 /
-    # Split by comma or whitespace, then parse each assignment
-    # First remove namelist markers
-    content = re.sub(r'&\w+', ' ', content)  # Remove &namelist_name
-    content = re.sub(r'/', ' ', content)      # Remove /
+    # Parse boundary conditions
+    if 'boundary_conditions' in config:
+        bc = config['boundary_conditions']
+        params.update(bc)
+        # Map boundary condition names
+        if 'tempPreheat' in bc:
+            params['temppreheat'] = bc['tempPreheat']
+        if 'tempAmb' in bc:
+            params['tempamb'] = bc['tempAmb']
+        if 'htckn' in bc:
+            params['htckn'] = bc['htckn']
     
-    # Split into tokens by comma and whitespace, but keep = together with name/value
-    # Match pattern: name=value where value can have scientific notation
-    pattern = r'(\w+)\s*=\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eEdD][+-]?\d+)?)'
-    
-    for match in re.finditer(pattern, content):
-        name = match.group(1).lower()
-        value_str = match.group(2).strip()
-        
-        # Try to parse the value
-        params[name] = _parse_value(value_str)
+    # Parse output config if present
+    if 'output' in config:
+        params.update(config['output'])
     
     return params
 
 
-def _parse_geometry_section(lines: list) -> Dict[str, Any]:
+def _parse_geometry_yaml(geom: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Parse the geometry section of input_param.txt.
+    Parse geometry section from YAML structure.
     
-    Based on mod_param.f90 read_data subroutine:
-        Line 0: comment (skipped by read(10,*))
-        Line 1: nzx (number of x-zones)
-        Line 2: xzone values
-        Line 3: ncvx values (control volumes per zone)
-        Line 4: powrx values (exponents)
-        Line 5: nzy
-        Line 6: yzone values
-        Line 7: ncvy values
-        Line 8: powry values
-        Line 9: nzz
-        Line 10: zzone values
-        Line 11: ncvz values
-        Line 12: powrz values
+    Args:
+        geom: Geometry dictionary from YAML
+        
+    Returns:
+        Flattened geometry parameters
     """
     params = {}
     
-    # Filter out empty lines but keep comments for proper indexing
-    # The Fortran code skips comment line with read(10,*)
-    data_lines = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        # Remove inline comments but keep the data part
-        if '!' in line:
-            # Check if there's data before the comment
-            data_part = line[:line.index('!')].strip()
-            if data_part:
-                line = data_part
-            else:
-                continue  # Pure comment line, skip
-        if line:
-            data_lines.append(line)
-    
-    if len(data_lines) < 12:
-        return params  # Not enough lines for geometry (need 12 data lines)
-    
-    idx = 0
+    # Helper to ensure list format
+    def to_list(val):
+        if isinstance(val, list):
+            return val
+        return [val]
     
     # X-direction
-    params['nzx'] = int(data_lines[idx]); idx += 1
-    params['xzone'] = [_parse_single_value(v) for v in data_lines[idx].split()]; idx += 1
-    params['ncvx'] = [int(_parse_single_value(v)) for v in data_lines[idx].split()]; idx += 1
-    params['powrx'] = [_parse_single_value(v) for v in data_lines[idx].split()]; idx += 1
+    if 'x' in geom:
+        x = geom['x']
+        params['nzx'] = x.get('zones', 1)
+        params['xzone'] = to_list(x.get('zone_length_m', 1.0e-3))
+        params['ncvx'] = to_list(x.get('cv_per_zone', 100))
+        params['powrx'] = to_list(x.get('cv_boundary_exponent', 1.0))
     
     # Y-direction
-    params['nzy'] = int(data_lines[idx]); idx += 1
-    params['yzone'] = [_parse_single_value(v) for v in data_lines[idx].split()]; idx += 1
-    params['ncvy'] = [int(_parse_single_value(v)) for v in data_lines[idx].split()]; idx += 1
-    params['powry'] = [_parse_single_value(v) for v in data_lines[idx].split()]; idx += 1
+    if 'y' in geom:
+        y = geom['y']
+        params['nzy'] = y.get('zones', 1)
+        params['yzone'] = to_list(y.get('zone_length_m', 1.0e-3))
+        params['ncvy'] = to_list(y.get('cv_per_zone', 100))
+        params['powry'] = to_list(y.get('cv_boundary_exponent', 1.0))
     
     # Z-direction
-    params['nzz'] = int(data_lines[idx]); idx += 1
-    params['zzone'] = [_parse_single_value(v) for v in data_lines[idx].split()]; idx += 1
-    params['ncvz'] = [int(_parse_single_value(v)) for v in data_lines[idx].split()]; idx += 1
-    params['powrz'] = [_parse_single_value(v) for v in data_lines[idx].split()]; idx += 1
+    if 'z' in geom:
+        z = geom['z']
+        params['nzz'] = z.get('zones', 1)
+        params['zzone'] = to_list(z.get('zone_length_m', 0.5e-3))
+        params['ncvz'] = to_list(z.get('cv_per_zone', 50))
+        params['powrz'] = to_list(z.get('cv_boundary_exponent', 1.0))
     
     # Compute total grid dimensions from zones
-    params['nx'] = sum(params['ncvx'])
-    params['ny'] = sum(params['ncvy'])
-    params['nz'] = sum(params['ncvz'])
+    params['nx'] = sum(params.get('ncvx', [100]))
+    params['ny'] = sum(params.get('ncvy', [100]))
+    params['nz'] = sum(params.get('ncvz', [50]))
     
     # Compute total domain lengths
-    params['xl'] = sum(params['xzone'])
-    params['yl'] = sum(params['yzone'])
-    params['zl'] = sum(params['zzone'])
+    params['xl'] = sum(params.get('xzone', [1.0e-3]))
+    params['yl'] = sum(params.get('yzone', [1.0e-3]))
+    params['zl'] = sum(params.get('zzone', [0.5e-3]))
     
     return params
-
-
-def _parse_value(value_str: str) -> Any:
-    """Parse a value string into appropriate Python type."""
-    value_str = value_str.strip().rstrip(',')
-    
-    # Check for boolean
-    if value_str.lower() in ['.true.', 'true', '.t.', 't']:
-        return True
-    if value_str.lower() in ['.false.', 'false', '.f.', 'f']:
-        return False
-    
-    # Check for string (quoted)
-    if (value_str.startswith("'") and value_str.endswith("'")) or \
-       (value_str.startswith('"') and value_str.endswith('"')):
-        return value_str[1:-1]
-    
-    # Check for array (comma-separated)
-    if ',' in value_str:
-        values = [_parse_single_value(v.strip()) for v in value_str.split(',')]
-        return values
-    
-    return _parse_single_value(value_str)
-
-
-def _parse_single_value(value_str: str) -> Any:
-    """Parse a single value (int, float, or string)."""
-    value_str = value_str.strip()
-    
-    # Handle Fortran double precision notation (1.0d0 -> 1.0e0)
-    value_str = re.sub(r'([0-9.]+)[dD]([+-]?[0-9]+)', r'\1e\2', value_str)
-    
-    try:
-        # Try integer first
-        if '.' not in value_str and 'e' not in value_str.lower():
-            return int(value_str)
-        # Then float
-        return float(value_str)
-    except ValueError:
-        return value_str
 
 
 def _create_physics_params(params: Dict[str, Any]) -> PhysicsParams:
     """Create PhysicsParams from parsed dictionary.
     
-    Maps Fortran variable names from mod_param.f90:
-        dens -> rho, denl -> rholiq
-        thconsa, thconsb -> thermal conductivity coefficients
-        thconl -> liquid thermal conductivity
-        hsmelt, hlfriz -> enthalpy at solidus/liquidus (precomputed in Fortran)
-        dgdtp -> dgdt (surface tension temperature gradient)
+    Maps YAML variable names to PhysicsParams fields.
     """
     
     # Specific heat coefficients (Cp = acpa*T + acpb for solid)
@@ -243,11 +188,10 @@ def _create_physics_params(params: Dict[str, Any]) -> PhysicsParams:
     # Temperatures
     tsolid = _get_scalar(params, 'tsolid', default=1563.0)
     tliquid = _get_scalar(params, 'tliquid', default=1623.0)
-    tpreheat = _get_scalar(params, 'temppreheat', 'tpreheat', default=300.0)
+    tpreheat = _get_scalar(params, 'temppreheat', 'tpreheat', 'tempPreheat', default=300.0)
     tvapor = _get_scalar(params, 'tboiling', 'tvapor', default=3000.0)
     
     # Enthalpy at phase boundaries
-    # hsmelt and hlfriz may be provided directly from Fortran input
     if 'hsmelt' in params and 'hlfriz' in params:
         hsmelt = _get_scalar(params, 'hsmelt', default=0.0)
         hlcal = _get_scalar(params, 'hlfriz', default=0.0)
@@ -260,27 +204,25 @@ def _create_physics_params(params: Dict[str, Any]) -> PhysicsParams:
     
     hpreheat = _temp_to_enthalpy_solid(tpreheat, acpa, acpb)
     
-    # Density (Fortran uses dens/denl)
+    # Density
     rho = _get_scalar(params, 'dens', 'rho', default=7800.0)
     rholiq = _get_scalar(params, 'denl', 'rholiq', default=rho)
     
-    # Thermal conductivity (Fortran uses thconsa, thconsb for solid, thconl for liquid)
-    # k_solid = thconsa*T + thconsb
+    # Thermal conductivity
     thconsa = _get_scalar(params, 'thconsa', default=0.0)
     thconsb = _get_scalar(params, 'thconsb', default=25.0)
     tcond = thconsb  # Use constant term as representative solid conductivity
     tcondl = _get_scalar(params, 'thconl', 'tcondl', default=tcond)
     
-    # Surface tension (Fortran uses dgdtp)
+    # Surface tension
     dgdt = _get_scalar(params, 'dgdtp', 'dgdt', default=-4.3e-4)
     sigma_surf = _get_scalar(params, 'sigma_surf', default=1.8)
     
     # Radiation/convection
     emiss = _get_scalar(params, 'emiss', default=0.4)
     sigma = 5.67e-8  # Stefan-Boltzmann constant
-    # Use htck1 (top surface) as representative convection coefficient
     hconv = _get_scalar(params, 'htckn', 'hconv', default=10.0)
-    tenv = _get_scalar(params, 'tempamb', 'tenv', default=300.0)
+    tenv = _get_scalar(params, 'tempamb', 'tempAmb', 'tenv', default=300.0)
     
     # Viscosity
     vis0 = _get_scalar(params, 'viscos', 'vis0', default=6.0e-3)
@@ -329,10 +271,7 @@ def _temp_to_enthalpy_solid(T: float, acpa: float, acpb: float) -> float:
 
 
 def _create_simulation_params(params: Dict[str, Any]) -> SimulationParams:
-    """Create SimulationParams from parsed dictionary.
-    
-    Uses geometry computed from zone data and Fortran namelist values.
-    """
+    """Create SimulationParams from parsed dictionary."""
     return SimulationParams(
         delt=params.get('delt', 1.0e-6),
         timax=params.get('timax', 1.0e-3),
@@ -347,9 +286,9 @@ def _create_simulation_params(params: Dict[str, Any]) -> SimulationParams:
         xlen=params.get('xl', params.get('xlen', 1.0e-3)),
         ylen=params.get('yl', params.get('ylen', 1.0e-3)),
         zlen=params.get('zl', params.get('zlen', 0.5e-3)),
-        stretch_x=params.get('powrx', params.get('stretch_x', params.get('stretchx', 1.0))),
-        stretch_y=params.get('powry', params.get('stretch_y', params.get('stretchy', 1.0))),
-        stretch_z=params.get('powrz', params.get('stretch_z', params.get('stretchz', 1.0))),
+        stretch_x=_get_scalar(params, 'powrx', 'stretch_x', 'stretchx', default=1.0),
+        stretch_y=_get_scalar(params, 'powry', 'stretch_y', 'stretchy', default=1.0),
+        stretch_z=_get_scalar(params, 'powrz', 'stretch_z', 'stretchz', default=1.0),
     )
 
 
@@ -365,24 +304,16 @@ def _get_scalar(params: Dict[str, Any], *keys, default=None):
 
 
 def _create_laser_params(params: Dict[str, Any]) -> LaserParams:
-    """Create LaserParams from parsed dictionary.
-    
-    Supports both surface and volumetric laser sources from Fortran:
-        Surface: alaspow, alaseta, alasrb
-        Volumetric: alaspowvol, alasetavol, sourcerad, sourcedepth
-    """
+    """Create LaserParams from parsed dictionary."""
     import math
     
-    # Try volumetric parameters first (more commonly used in input file)
+    # Try volumetric parameters first (more commonly used)
     power = _get_scalar(params, 'alaspowvol', 'alaspow', 'power', 'plaser', default=200.0)
     absorptivity = _get_scalar(params, 'alasetavol', 'alaseta', 'absorptivity', 'absorp', default=0.35)
     radius = _get_scalar(params, 'sourcerad', 'alasrb', 'radius', 'rb', default=50.0e-6)
     efficiency = _get_scalar(params, 'alasfact', 'efficiency', 'eff', default=1.0)
     
     # Compute peak heat flux for Gaussian distribution
-    # q(r) = q_peak * exp(-2*r^2/rb^2)
-    # Total power = integral(q * 2*pi*r dr) = q_peak * pi * rb^2 / 2
-    # q_peak = 2 * P * absorptivity / (pi * rb^2)
     peak_flux = 2.0 * power * absorptivity * efficiency / (math.pi * radius * radius)
     
     return LaserParams(
@@ -517,9 +448,6 @@ def write_tecplot(filepath: str, state, grid, time: float) -> None:
         f.write(f'ZONE T="Zone1", I={ni}, J={nj}, K={nk}, F=POINT\n')
         
         # Convert Taichi fields to numpy for output
-        x = state.temp.to_numpy() * 0  # Placeholder, need grid coords
-        y = state.temp.to_numpy() * 0
-        z = state.temp.to_numpy() * 0
         temp = state.temp.to_numpy()
         enthalpy = state.enthalpy.to_numpy()
         fracl = state.fracl.to_numpy()
