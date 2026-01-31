@@ -29,6 +29,7 @@ from param import parse_input
 from toolpath import load_toolpath, read_coordinates as toolpath_read_coordinates
 from geom import get_gridparams
 from entot import enthalpy_to_temp as entot_enthalpy_to_temp
+from dimen import pool_size, clean_uvw
 
 # TODO: These modules will be created from corresponding .f90 files
 # from initialization import initialize
@@ -193,12 +194,14 @@ def pool_size(state: State, grid: GridParams, physics: PhysicsParams,
     Gets melt pool dimension, start and end index of i,j,k to determine fluid region.
     Also updates pool.max_temp (tpeak in Fortran).
     
+    NOTE: This is now imported from dimen.py module
+    
     Returns:
         tuple: (ist, ien, jst, jen, kst, ken) - start/end indices for melt pool region
     """
-    # TODO: Find liquid region bounds and compute pool dimensions
-    pool.max_temp = 300.0  # Placeholder - should compute actual peak temp
-    return (1, 1, 1, 1, 1, 1)  # ist, ien, jst, jen, kst, ken
+    # This import is at module level now
+    from dimen import pool_size as dimen_pool_size
+    return dimen_pool_size(state, grid, physics, pool)
 
 
 def clean_uvw(state: State, grid: GridParams, physics: PhysicsParams) -> State:
@@ -206,11 +209,14 @@ def clean_uvw(state: State, grid: GridParams, physics: PhysicsParams) -> State:
     
     Sets velocity to zero for cells where temp <= tsolid (outside liquid region).
     
+    NOTE: This is now imported from dimen.py module
+    
     Returns:
         state: Updated state with velocities zeroed in solid region
     """
-    # TODO: Zero velocities in solid cells
-    return state
+    # This import is at module level now
+    from dimen import clean_uvw as dimen_clean_uvw
+    return dimen_clean_uvw(state, grid, physics)
 
 
 def revision_p(state: State, coeffs: DiscretCoeffs, grid: GridParams,
