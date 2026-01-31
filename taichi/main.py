@@ -24,26 +24,30 @@ from data_structures import (
     TimeState, PoolDimensions, ConvergenceState
 )
 
-# I/O, geometry, and toolpath
-from param import parse_input
-from toolpath import load_toolpath, read_coordinates as toolpath_read_coordinates
+# I/O and geometry
+from param import parse_input, load_toolpath
 from geom import get_gridparams
 from bound import bound_condition
+<<<<<<< HEAD
 from entot import enthalpy_to_temp as entot_enthalpy_to_temp
 from dimen import pool_size, clean_uvw
 from revise import revision_p as revise_revision_p
+=======
+from discret import discretize
+>>>>>>> 2390666 (adding discret.py and test_discret.py)
 
 # TODO: These modules will be created from corresponding .f90 files
 # from initialization import initialize
-# from discretization import discretize
 # from source import source_term
 # from residue import residual
 # from solver import solution_enthalpy, solution_uvw
 # from fluxes import heat_fluxes
 # from properties import properties
+# from entotemp import enthalpy_to_temp
 # from convergence import enhance_converge_speed
 # from revision import revision_p
 # from laserinput import laser_beam, calc_rhf
+# from toolpath import read_coordinates
 # from printing import output_results, custom_output
 
 
@@ -79,20 +83,6 @@ def properties(state: State, mat_props: MaterialProps, physics: PhysicsParams) -
     # TODO: Implement temperature-dependent viscosity, diffusion, etc.
     return mat_props
 
-
-def discretize(ivar: int, state: State, grid: GridParams, 
-               coeffs: DiscretCoeffs, mat_props: MaterialProps,
-               sim: SimulationParams, physics: PhysicsParams) -> DiscretCoeffs:
-    """Build discretization coefficients. (From discretization.f90)
-    
-    Args:
-        ivar: Variable index (1=u, 2=v, 3=w, 4=p, 5=enthalpy)
-        
-    Returns:
-        coeffs: Updated discretization coefficients (ap, ae, aw, an, as_, at, ab)
-    """
-    # TODO: Implement FVM discretization
-    return coeffs
 
 
 def source_term(ivar: int, state: State, state_prev: StatePrev,
@@ -166,12 +156,12 @@ def enthalpy_to_temp(state: State, physics: PhysicsParams) -> State:
     """Convert enthalpy field to temperature. (From entotemp.f90)
     
     Translates enthalpy to temperature, handling phase change.
-    Uses the implementation from entot.py module.
     
     Returns:
         state: Updated state with temperature and liquid fraction fields
     """
-    return entot_enthalpy_to_temp(state, physics)
+    # TODO: Implement enthalpy-to-temperature conversion with mushy zone
+    return state
 
 
 def pool_size(state: State, grid: GridParams, physics: PhysicsParams,
@@ -181,14 +171,12 @@ def pool_size(state: State, grid: GridParams, physics: PhysicsParams,
     Gets melt pool dimension, start and end index of i,j,k to determine fluid region.
     Also updates pool.max_temp (tpeak in Fortran).
     
-    NOTE: This is now imported from dimen.py module
-    
     Returns:
         tuple: (ist, ien, jst, jen, kst, ken) - start/end indices for melt pool region
     """
-    # This import is at module level now
-    from dimen import pool_size as dimen_pool_size
-    return dimen_pool_size(state, grid, physics, pool)
+    # TODO: Find liquid region bounds and compute pool dimensions
+    pool.max_temp = 300.0  # Placeholder - should compute actual peak temp
+    return (1, 1, 1, 1, 1, 1)  # ist, ien, jst, jen, kst, ken
 
 
 def clean_uvw(state: State, grid: GridParams, physics: PhysicsParams) -> State:
@@ -196,14 +184,11 @@ def clean_uvw(state: State, grid: GridParams, physics: PhysicsParams) -> State:
     
     Sets velocity to zero for cells where temp <= tsolid (outside liquid region).
     
-    NOTE: This is now imported from dimen.py module
-    
     Returns:
         state: Updated state with velocities zeroed in solid region
     """
-    # This import is at module level now
-    from dimen import clean_uvw as dimen_clean_uvw
-    return dimen_clean_uvw(state, grid, physics)
+    # TODO: Zero velocities in solid cells
+    return state
 
 
 def revision_p(state: State, coeffs: DiscretCoeffs, grid: GridParams,
@@ -267,12 +252,12 @@ def read_coordinates(time_state: TimeState, toolpath: ToolPath,
     """Read/interpolate coordinates from toolpath. (From toolpath.f90)
     
     Reads current position along toolpath based on simulation time.
-    Uses the implementation from toolpath.py module.
     
     Returns:
         laser_state: Updated with current beam coordinates
     """
-    return toolpath_read_coordinates(time_state, toolpath, laser_state)
+    # TODO: Interpolate toolpath to get current coordinates
+    return laser_state
 
 
 def output_results(time_state: TimeState, state: State, conv: ConvergenceState,
@@ -323,24 +308,7 @@ def main():
     # Read input parameters (corresponds to read_data in Fortran)
     print("Reading input parameters...")
     physics, sim, laser, output_cfg = parse_input(str(input_yaml))
-    simu_params = SimulationParams(
-        delt=sim.delt,
-        timax=sim.timax,
-        urf_vel=sim.urf_vel,
-        urf_p=sim.urf_p,
-        urf_h=sim.urf_h,
-        max_iter=sim.max_iter,
-        conv_tol=sim.conv_tol,
-        ni=sim.ni,
-        nj=sim.nj,
-        nk=sim.nk,
-        xlen=sim.xlen,
-        ylen=sim.ylen,
-        zlen=sim.zlen,
-        stretch_x=sim.stretch_x,
-        stretch_y=sim.stretch_y,
-        stretch_z=sim.stretch_z,
-    )
+  
     
     # Read toolpath (corresponds to read_toolpath in Fortran)
     if toolpath_file.exists():
@@ -360,18 +328,18 @@ def main():
     print("Allocating state arrays...")
     state = State(ni, nj, nk)
     state_prev = StatePrev(ni, nj, nk)
-    mat_props = MaterialProps(ni, nj, nk)
-    coeffs = DiscretCoeffs(ni, nj, nk)
+    material_props = MaterialProps(ni, nj, nk)
+    discret_coeffs = DiscretCoeffs(ni, nj, nk)
     laser_state = LaserState(ni, nj)
     
     # Initialize variables (corresponds to initialize in Fortran)
     print("Initializing fields...")
     initialize(state, state_prev, mat_props, physics, grid)
-    
+    simulation_params = SimulationParams(ni, nj, nk)
     # Initialize tracking structures
     time_state = TimeState()
-    pool = PoolDimensions()
-    conv = ConvergenceState()
+    pool_dimensions = PoolDimensions()
+    convergence_state = ConvergenceState()
     
     # Record start time
     wall_start = pytime.time()
@@ -415,7 +383,7 @@ def main():
             
             properties(state, mat_props, physics)
             ahtoploss = bound_condition(ivar, state, grid, mat_props, physics, simu_params, laser_state)
-            discretize(ivar, state, grid, coeffs, mat_props, sim, physics)
+            discretize(ivar, state, state_prev, grid, coeffs, mat_props, sim, physics)
             source_term(ivar, state, state_prev, grid, coeffs, 
                        laser_state, physics, sim)
             residual(ivar, state, coeffs, conv)
@@ -439,7 +407,7 @@ def main():
                 # Solve momentum equations (ivar=1,2,3) and pressure (ivar=4)
                 for ivar in range(1, 5):
                     bound_condition(ivar, state, grid, mat_props, physics, simu_params)
-                    discretize(ivar, state, grid, coeffs, mat_props, sim, physics)
+                    discretize(ivar, state, state_prev, grid, coeffs, mat_props, sim, physics)
                     source_term(ivar, state, state_prev, grid, coeffs,
                                laser_state, physics, sim)
                     residual(ivar, state, coeffs, conv)
